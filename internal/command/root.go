@@ -28,6 +28,8 @@ const (
 
 	actionAllow       = "allow"
 	actionDeny        = "deny"
+	commandCreate     = "create"
+	workspaceLabel    = "workspace"
 	commandGet        = "get"
 	commandInspect    = "inspect"
 	commandReset      = "reset"
@@ -133,7 +135,7 @@ func (r *Runner) Run(ctx context.Context, args []string) int {
 		return 0
 	case "version":
 		return r.version(ctx, rest[1:])
-	case "create":
+	case commandCreate:
 		return r.create(ctx, rest[1:])
 	case "ls", commandList:
 		return r.list(ctx, rest[1:])
@@ -210,7 +212,7 @@ func (r *Runner) runAuxiliaryCommand(ctx context.Context, name string, args []st
 	case commandAgents:
 		return r.agents(args), true
 	case "env":
-		return r.environment(args), true
+		return r.environment(ctx, args), true
 	case commandReset:
 		return r.reset(ctx, args), true
 	case "tui":
@@ -1222,7 +1224,7 @@ func (r *Runner) create(ctx context.Context, args []string) int {
 		return 0
 	}
 	if parseErr, ok := asFlagParseError(err); ok {
-		return r.flagParseFailure("create", parseErr.err)
+		return r.flagParseFailure(commandCreate, parseErr.err)
 	}
 	if err != nil {
 		r.error(err)
@@ -1388,14 +1390,14 @@ func resolveCreateWorkspaces(workspaceFlags stringListFlag, paths []string) ([]s
 
 //nolint:gocyclo,cyclop,funlen // create accepts the full documented flag matrix.
 func parseCreateOptions(ctx context.Context, args []string) (createOptions, bool, error) {
-	fs := flag.NewFlagSet("create", flag.ContinueOnError)
+	fs := flag.NewFlagSet(commandCreate, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	image := fs.String("image", "", "image reference")
 	template := fs.String("template", "", "container image to use for the sandbox (alias for --image)")
 	fs.StringVar(template, "t", "", "container image to use for the sandbox (alias for --image)")
 	nameFlag := fs.String("name", "", "sandbox name")
 	var workspaceFlags stringListFlag
-	fs.Var(&workspaceFlags, "workspace", "host workspace path, optionally suffixed with :ro (repeatable)")
+	fs.Var(&workspaceFlags, workspaceLabel, "host workspace path, optionally suffixed with :ro (repeatable)")
 	var publishFlags stringListFlag
 	fs.Var(&publishFlags, "publish", "publish [[HOST_IP:]HOST_PORT:]GUEST[/tcp|udp|tcp4|udp4|tcp6|udp6] (repeatable)")
 	fs.Var(&publishFlags, "p", "publish [[HOST_IP:]HOST_PORT:]GUEST[/tcp|udp|tcp4|udp4|tcp6|udp6] (repeatable; alias for --publish)")

@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,15 +24,23 @@ func (f *repeatedStringFlag) Set(value string) error {
 	return nil
 }
 
-func (r *Runner) environment(args []string) int {
+func (r *Runner) environment(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env plan [PATH...]\n\nCreate a static, read-only preview from the current directory and optional user defaults, or from explicit sbxenv.yaml paths. Explicit paths skip user defaults.\nWorkspace paths and declared ports are previewed; no sandbox is created, changed, or queried. Environment values are never displayed.\nApply, create, run, exec, and rm are unsupported.\n")
+		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env COMMAND [PATH...]\n\nCommands: plan, create.\n\nUse 'plan' for a static preview or 'create' to apply the supported subset and create without attaching. run, exec, and rm are not implemented yet. Environment values are never displayed.\n")
 		return 0
 	}
-	if args[0] != "plan" {
-		_, _ = fmt.Fprintf(r.Err, "rsbx env %s: unsupported: only static plan preview is implemented\n", args[0])
+	switch args[0] {
+	case "plan":
+		return r.environmentPlan(args[1:])
+	case commandCreate:
+		return r.environmentCreate(ctx, args[1:])
+	default:
+		_, _ = fmt.Fprintf(r.Err, "rsbx env %s: unsupported\n", args[0])
 		return 1
 	}
+}
+
+func (r *Runner) environmentPlan(args []string) int {
 	fs := flag.NewFlagSet("env plan", flag.ContinueOnError)
 	fs.SetOutput(r.Err)
 	name := fs.String("name", "", "override the environment sandbox name")
@@ -42,7 +51,7 @@ func (r *Runner) environment(args []string) int {
 		_, _ = fmt.Fprint(fs.Output(), "Usage: rsbx env plan [PATH...] [flags]\n\nWithout PATH, read sbxenv.yaml from the current directory and merge optional ~/.sbxenv.yaml defaults first. Explicit file or directory paths merge in order and skip user defaults.\nYAML values expand env.projectDir and env.fileDir references. Declared ports are validated and displayed without opening sockets. Argument values are validated, redacted, and interpolated once into YAML values; kit arguments are unsupported.\n  --name NAME                 override the sandbox name\n  --env-arg name=value        set a declared environment argument (repeatable; overrides files)\n  --env-args-file PATH        read name=value arguments (repeatable)\n\nValues passed through --env-arg may be visible in host process listings; use --env-args-file for sensitive values. This is a static preview only; it does not apply changes or inspect daemon state.\n")
 	}
 	valueFlags := map[string]bool{"--name": true, "--env-arg": true, "--env-args-file": true}
-	if err := fs.Parse(reorderFlagArgs(args[1:], valueFlags)); err != nil {
+	if err := fs.Parse(reorderFlagArgs(args, valueFlags)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}

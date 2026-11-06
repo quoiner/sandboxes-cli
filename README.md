@@ -19,6 +19,21 @@ completions with `rsbx completion <shell>`. The daemon socket and sandbox data
 are unchanged. No `qsbx` compatibility binary or Docker-owned `sbx` alias is
 installed.
 
+## Environment files
+
+`rsbx env plan [PATH...]` renders a read-only, redacted preview. `rsbx env
+create [PATH...]` applies the currently supported local subset and creates a
+sandbox without attaching. The subset includes agent, name, workspace mounts,
+ports, environment variables, and CPU/memory options. The command asks for
+approval on a terminal; non-interactive use must pass `--force`, which approves
+only that invocation. Environment values are sent to the local daemon but are
+never printed by the CLI.
+
+Lifecycle commands `env run`, `env exec`, and `env rm`, as well as kits,
+credentials, host commands, and MCP declarations, are not implemented yet and
+fail closed. `env apply` and `env ls` are not Docker `sbx` commands; Rheic keeps
+the upstream `create` name for provisioning.
+
 ## Commands
 
 ```sh

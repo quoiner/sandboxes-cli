@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	sdk "github.com/rheic/sandboxes-go-sdk"
 )
 
 func TestEnvironmentPlanIsReadOnlyAndRedactsValues(t *testing.T) {
@@ -115,7 +117,7 @@ func TestEnvironmentPlanEscapesWorkspaceControlCharacters(t *testing.T) {
 }
 
 func TestEnvironmentMutatingCommandsFailClosed(t *testing.T) {
-	for _, args := range [][]string{{"env", "create"}, {"env", "run", "./"}, {"env", "rm", "x"}} {
+	for _, args := range [][]string{{"env", "run", "./"}, {"env", "rm", "x"}, {"env", "ls"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			runner := NewRunner(&stdout, &stderr)
@@ -126,6 +128,76 @@ func TestEnvironmentMutatingCommandsFailClosed(t *testing.T) {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+type environmentCreateRecorder struct {
+	fakeSandbox
+	request sdk.CreateRequest
+}
+
+func (s *environmentCreateRecorder) Create(_ context.Context, request sdk.CreateRequest) (*sdk.Operation, error) {
+	s.request = request
+	s.request.Env = make(map[string]string, len(request.Env))
+	for key, value := range request.Env {
+		s.request.Env[key] = value
+	}
+	return &sdk.Operation{ID: "op-env-create", SandboxID: "sb-env-create", State: sdk.StateDone}, nil
+}
+
+func TestEnvironmentCreateAppliesApprovedPlanWithoutPrintingValues(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "project")
+	if err := os.Mkdir(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "sbxenv.yaml")
+	body := "schemaVersion: \"1\"\nname: environment-test\nagent: shell\nworkspace: ./project\nports:\n  - sandbox: 3000\n    protocol: tcp\nenv:\n  API_TOKEN: secret-value\nsandboxOptions:\n  cpus: 2\n  memory: 2g\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &environmentCreateRecorder{}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.NewClient = func(string) (sdk.Client, error) { return fakeClient{sandbox: server}, nil }
+	if code := runner.Run(context.Background(), []string{"env", "create", "--force", path}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if server.request.Name != "environment-test" || server.request.Agent != "shell" || server.request.Workspace != workspace {
+		t.Fatalf("create request identity/workspace = %+v", server.request)
+	}
+	if server.request.Env["API_TOKEN"] != "secret-value" || server.request.CPUs != 2 || server.request.MemoryMiB != 2048 {
+		t.Fatalf("create request omitted config values")
+	}
+	if len(server.request.Ports) != 1 || server.request.Ports[0].Guest != 3000 || server.request.Ports[0].Host != 0 {
+		t.Fatalf("ports = %+v", server.request.Ports)
+	}
+	if strings.Contains(stdout.String(), "secret-value") || strings.Contains(stderr.String(), "secret-value") {
+		t.Fatal("environment value leaked to CLI output")
+	}
+}
+
+func TestEnvironmentCreateRequiresApprovalBeforeConnecting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nagent: shell\nenv:\n  TOKEN: secret-value\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.In = strings.NewReader("y\n")
+	runner.NewClient = func(string) (sdk.Client, error) {
+		called = true
+		return fakeClient{}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "create", path}); code == 0 {
+		t.Fatal("non-terminal create unexpectedly passed approval")
+	}
+	if called {
+		t.Fatal("daemon client was created before approval succeeded")
+	}
+	if strings.Contains(stdout.String(), "secret-value") || strings.Contains(stderr.String(), "secret-value") {
+		t.Fatal("environment value leaked during approval")
 	}
 }
 

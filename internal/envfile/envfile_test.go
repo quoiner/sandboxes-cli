@@ -46,6 +46,26 @@ func TestLoadMergesFilesAndDiscardsEnvironmentValues(t *testing.T) {
 	}
 }
 
+func TestLoadForExecutionReturnsMergedValuesWithoutPuttingThemInPlan(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.yaml")
+	second := filepath.Join(dir, "second.yaml")
+	writeEnvFile(t, first, "schemaVersion: \"1\"\nagent: shell\nenv:\n  TOKEN: first-secret\n  SHARED: old\n")
+	writeEnvFile(t, second, "schemaVersion: \"1\"\nenv:\n  SHARED: final-secret\n  MODE: test\n")
+
+	plan, values, err := LoadForExecution([]string{first, second}, ArgumentOverrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(values)
+	if values["TOKEN"] != "first-secret" || values["SHARED"] != "final-secret" || values["MODE"] != "test" {
+		t.Fatalf("merged values are incorrect")
+	}
+	if strings.Contains(fmt.Sprint(plan), "first-secret") || strings.Contains(fmt.Sprint(plan), "final-secret") {
+		t.Fatal("runtime environment values leaked into the preview plan")
+	}
+}
+
 func TestLoadDefaultMergesUserDefaultsBeforeCurrentDirectory(t *testing.T) {
 	root := t.TempDir()
 	homeDir := filepath.Join(root, "home")
@@ -79,7 +99,7 @@ func TestLoadDefaultMergesUserDefaultsBeforeCurrentDirectory(t *testing.T) {
 	}
 }
 
-func TestLoadDefaultAllowsMissingUserDefaultsButRequiresProjectFile(t *testing.T) {
+func TestLoadDefaultAllowsEitherHomeDefaultsOrProjectFile(t *testing.T) {
 	root := t.TempDir()
 	homeDir := filepath.Join(root, "home")
 	workingDir := filepath.Join(root, "project")
@@ -93,8 +113,16 @@ func TestLoadDefaultAllowsMissingUserDefaultsButRequiresProjectFile(t *testing.T
 	if _, err := LoadDefault(homeDir, workingDir); err != nil {
 		t.Fatalf("missing optional home defaults rejected: %v", err)
 	}
-	if _, err := LoadDefault(homeDir, root); err == nil {
-		t.Fatal("missing working-directory environment file accepted")
+	writeEnvFile(t, filepath.Join(homeDir, ".sbxenv.yaml"), "schemaVersion: \"1\"\nagent: shell\nworkspace: ${{ env.projectDir }}\n")
+	plan, err := LoadDefault(homeDir, root)
+	if err != nil {
+		t.Fatalf("home-only environment defaults rejected: %v", err)
+	}
+	if plan.Workspace != root {
+		t.Fatalf("home default workspace=%q, want %q", plan.Workspace, root)
+	}
+	if _, err := LoadDefault(filepath.Join(root, "empty-home"), root); err == nil {
+		t.Fatal("missing both project and home environment files accepted")
 	}
 }
 
