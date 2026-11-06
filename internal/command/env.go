@@ -26,7 +26,7 @@ func (f *repeatedStringFlag) Set(value string) error {
 
 func (r *Runner) environment(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env COMMAND [PATH...]\n\nCommands: plan, create.\n\nUse 'plan' for a static preview or 'create' to apply the supported subset and create without attaching. run, exec, and rm are not implemented yet. Environment values are never displayed.\n")
+		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env COMMAND [PATH...]\n\nCommands: plan, create, exec.\n\nUse 'plan' for a static preview, 'create' to apply the supported subset without attaching, or 'exec' to run a command in an existing environment. run and rm are not implemented yet. Environment values are never displayed.\n")
 		return 0
 	}
 	switch args[0] {
@@ -34,6 +34,8 @@ func (r *Runner) environment(ctx context.Context, args []string) int {
 		return r.environmentPlan(args[1:])
 	case commandCreate:
 		return r.environmentCreate(ctx, args[1:])
+	case commandExec:
+		return r.environmentExec(ctx, args[1:])
 	default:
 		_, _ = fmt.Fprintf(r.Err, "rsbx env %s: unsupported\n", args[0])
 		return 1

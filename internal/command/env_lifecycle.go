@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 
 	sdk "github.com/rheic/sandboxes-go-sdk"
@@ -87,12 +89,45 @@ func loadEnvironmentCreatePlan(options environmentCreateOptions) (envfile.Plan, 
 	if err != nil {
 		return envfile.Plan{}, nil, "", 0, err
 	}
-	prepared, workspacePath, memory, err := prepareEnvironmentCreatePlan(plan, options.paths, options.name)
+	validated, err := validateEnvironmentValues(environment)
+	clear(environment)
 	if err != nil {
-		clear(environment)
 		return envfile.Plan{}, nil, "", 0, err
 	}
-	return prepared, environment, workspacePath, memory, nil
+	prepared, workspacePath, memory, err := prepareEnvironmentCreatePlan(plan, options.paths, options.name)
+	if err != nil {
+		clear(validated)
+		return envfile.Plan{}, nil, "", 0, err
+	}
+	return prepared, validated, workspacePath, memory, nil
+}
+
+func validateEnvironmentValues(values map[string]string) (map[string]string, error) {
+	entries := make([]string, 0, len(values))
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		entries = append(entries, key+"="+values[key])
+	}
+	validated, err := buildExecEnv(entries, nil)
+	clear(entries)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(validated))
+	for _, entry := range validated {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			clear(result)
+			return nil, errors.New("invalid environment entry")
+		}
+		result[key] = value
+	}
+	clear(validated)
+	return result, nil
 }
 
 func prepareEnvironmentCreatePlan(plan envfile.Plan, paths []string, name string) (envfile.Plan, string, uint32, error) {
@@ -162,6 +197,66 @@ func buildEnvironmentCreateRequest(plan envfile.Plan, environment map[string]str
 		Ports: ports, Agent: plan.Agent, CPUs: cpus, MemoryMiB: memory,
 		Env: environment, Privileged: privileged,
 	}
+}
+
+func (r *Runner) environmentExec(ctx context.Context, args []string) int {
+	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
+		_, _ = fmt.Fprintln(r.Out, "Usage: rsbx env exec [PATH...] -- COMMAND [ARG...] [--name NAME] [--env-arg NAME=VALUE]")
+		_, _ = fmt.Fprintln(r.Out, "Runs a command in a matching existing environment sandbox, starting it if stopped. Create a missing sandbox first.")
+		return 0
+	}
+	separator := slices.Index(args, "--")
+	if separator < 0 {
+		_, _ = fmt.Fprintln(r.Err, "usage: rsbx env exec [PATH...] -- COMMAND [ARG...]")
+		return 2
+	}
+	options, err := parseEnvironmentCreateOptions(r, args[:separator])
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return r.flagParseFailure("env exec", err)
+	}
+	command := args[separator+1:]
+	if len(command) == 0 {
+		_, _ = fmt.Fprintln(r.Err, "rsbx env exec: command is required after --")
+		return 2
+	}
+	plan, environment, workspacePath, _, err := loadEnvironmentCreatePlan(options)
+	if err != nil {
+		_, _ = fmt.Fprintf(r.Err, "rsbx env exec: %s\n", err)
+		return 1
+	}
+	clear(environment)
+	request := buildEnvironmentCreateRequest(plan, nil, workspacePath, 0)
+	client, err := r.client()
+	if err != nil {
+		r.error(err)
+		return 125
+	}
+	defer func() { _ = client.Close() }()
+	sandbox, found, err := lookupSandboxByName(ctx, client, plan.Name)
+	if err != nil {
+		r.error(err)
+		return 125
+	}
+	if !found {
+		_, _ = fmt.Fprintf(r.Err, "rsbx env exec: environment sandbox %q does not exist; run 'rsbx env create' first\n", plan.Name)
+		return 125
+	}
+	if sandbox.Agent != plan.Agent {
+		_, _ = fmt.Fprintln(r.Err, "rsbx env exec: existing sandbox agent does not match the environment")
+		return 125
+	}
+	if err := checkReusedWorkspace(sandbox, request.Workspaces); err != nil {
+		_, _ = fmt.Fprintf(r.Err, "rsbx env exec: %s\n", err)
+		return 125
+	}
+	if err := ensureSandboxRunning(ctx, client, sandbox); err != nil {
+		r.error(err)
+		return 125
+	}
+	return r.exec(ctx, append([]string{sandbox.ID}, command...))
 }
 
 var errEnvironmentCanceled = errors.New("environment creation was canceled")

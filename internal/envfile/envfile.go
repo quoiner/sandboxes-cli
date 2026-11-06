@@ -310,9 +310,9 @@ func readSourceDocument(path string) (sourceDocument, map[string]argumentDeclara
 	return sourceDocument{path: filePath, digest: digest}, declarations, size, nil
 }
 
-// LoadDefault resolves the current-directory environment with optional
-// user-level defaults. Explicit paths should use Load so home defaults are
-// skipped, matching the sbx env command contract.
+// LoadDefault resolves the current-directory environment and optional
+// user-level defaults. Either file may be absent; at least one must exist.
+// Explicit paths should use Load so home defaults are skipped, matching sbx.
 func LoadDefault(homeDir, workingDir string) (Plan, error) {
 	return LoadDefaultWithArguments(homeDir, workingDir, ArgumentOverrides{})
 }

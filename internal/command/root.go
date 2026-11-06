@@ -29,6 +29,7 @@ const (
 	actionAllow       = "allow"
 	actionDeny        = "deny"
 	commandCreate     = "create"
+	commandExec       = "exec"
 	workspaceLabel    = "workspace"
 	commandGet        = "get"
 	commandInspect    = "inspect"
@@ -183,7 +184,7 @@ func (r *Runner) runAuxiliaryCommand(ctx context.Context, name string, args []st
 		return r.run(ctx, args), true
 	case "attach":
 		return r.attach(ctx, args), true
-	case "exec":
+	case commandExec:
 		return r.exec(ctx, args), true
 	case "cp":
 		return r.cp(ctx, args), true

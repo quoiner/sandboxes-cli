@@ -3,8 +3,10 @@ package command
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -198,6 +200,72 @@ func TestEnvironmentCreateRequiresApprovalBeforeConnecting(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "secret-value") || strings.Contains(stderr.String(), "secret-value") {
 		t.Fatal("environment value leaked during approval")
+	}
+}
+
+func TestEnvironmentCreateRejectsGuestSecretReferencesBeforeConnecting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nagent: shell\nenv:\n  API_TOKEN: ${secret:openai}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.NewClient = func(string) (sdk.Client, error) {
+		called = true
+		return fakeClient{}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "create", "--force", path}); code == 0 {
+		t.Fatal("unsupported guest secret reference was accepted")
+	}
+	if called {
+		t.Fatal("daemon client was created for an invalid environment")
+	}
+	if !strings.Contains(stderr.String(), "${secret:service} is disabled") {
+		t.Fatalf("stderr=%q", stderr.String())
+	}
+}
+
+type environmentExecSandbox struct {
+	fakeSandbox
+	item       sdk.Sandbox
+	startCalls int
+}
+
+func (s *environmentExecSandbox) List(context.Context, sdk.ListOptions) (*sdk.Page[sdk.Sandbox], error) {
+	return &sdk.Page[sdk.Sandbox]{Items: []sdk.Sandbox{s.item}}, nil
+}
+
+func (s *environmentExecSandbox) Start(_ context.Context, id string) (*sdk.Operation, error) {
+	if id != s.item.ID {
+		return nil, errors.New("sandbox not found")
+	}
+	s.startCalls++
+	s.item.State = sdk.StateRunning
+	return &sdk.Operation{ID: "op-start", State: sdk.StateDone}, nil
+}
+
+func TestEnvironmentExecStartsMatchingSandboxAndRunsCommand(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-exec\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &environmentExecSandbox{item: sdk.Sandbox{
+		ID: "sb-env-exec", Name: "env-exec", Agent: "shell", State: sdk.StateStopped,
+		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
+	}}
+	executor := &recordingExecutor{}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return recordingExecClient{fakeClient: fakeClient{sandbox: server}, executor: executor}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "exec", path, "--", "printf", "ok"}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if server.startCalls != 1 || executor.request.SandboxID != "sb-env-exec" || !reflect.DeepEqual(executor.request.Argv, []string{"printf", "ok"}) {
+		t.Fatalf("start calls=%d exec request=%+v", server.startCalls, executor.request)
 	}
 }
 
