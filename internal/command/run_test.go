@@ -106,6 +106,7 @@ type fakeSessions struct {
 
 func (s *fakeSessions) OpenSession(_ context.Context, req sdk.SessionRequest) (sdk.ExecSession, error) {
 	s.req = req
+	s.req.Env = append([]string(nil), req.Env...)
 	s.opened = true
 	return &fakeSession{sessions: s}, nil
 }

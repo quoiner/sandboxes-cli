@@ -30,6 +30,7 @@ const (
 	actionDeny        = "deny"
 	commandCreate     = "create"
 	commandExec       = "exec"
+	commandRun        = "run"
 	workspaceLabel    = "workspace"
 	commandGet        = "get"
 	commandInspect    = "inspect"
@@ -180,7 +181,7 @@ func commandHintPath(cmdPath string) string {
 //nolint:cyclop,gocyclo // one dispatch switch is the command router.
 func (r *Runner) runAuxiliaryCommand(ctx context.Context, name string, args []string) (int, bool) {
 	switch name {
-	case "run":
+	case commandRun:
 		return r.run(ctx, args), true
 	case "attach":
 		return r.attach(ctx, args), true

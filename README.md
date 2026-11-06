@@ -29,10 +29,16 @@ approval on a terminal; non-interactive use must pass `--force`, which approves
 only that invocation. Environment values are sent to the local daemon but are
 never printed by the CLI.
 
-`rsbx env exec [PATH...] -- COMMAND [ARG...]` runs a command in a matching
-existing environment sandbox and starts it if stopped. Create a missing
-sandbox first. `env run` and `env rm`, as well as kits, credentials, host
-commands, and MCP declarations, are not implemented yet and fail closed.
+`rsbx env run [PATH...] [-- ARG...]` creates a missing sandbox or attaches the
+configured agent to an existing matching sandbox. `--detach` starts the
+sandbox without attaching. `--force` approves the plan for that invocation;
+it does not approve adoption of an existing sandbox, which requires an
+interactive confirmation. `rsbx env exec [PATH...] -- COMMAND [ARG...]` runs a
+command in a matching existing environment sandbox and starts it if stopped.
+Create a missing sandbox first.
+
+`env rm`, as well as kits, credentials, host commands, and MCP declarations,
+are not implemented yet and fail closed.
 `env apply` and `env ls` are not Docker `sbx` commands; Rheic keeps the upstream
 `create` name for provisioning.
 

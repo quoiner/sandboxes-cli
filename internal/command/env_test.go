@@ -119,7 +119,7 @@ func TestEnvironmentPlanEscapesWorkspaceControlCharacters(t *testing.T) {
 }
 
 func TestEnvironmentMutatingCommandsFailClosed(t *testing.T) {
-	for _, args := range [][]string{{"env", "run", "./"}, {"env", "rm", "x"}, {"env", "ls"}} {
+	for _, args := range [][]string{{"env", "rm", "x"}, {"env", "ls"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			runner := NewRunner(&stdout, &stderr)
@@ -266,6 +266,56 @@ func TestEnvironmentExecStartsMatchingSandboxAndRunsCommand(t *testing.T) {
 	}
 	if server.startCalls != 1 || executor.request.SandboxID != "sb-env-exec" || !reflect.DeepEqual(executor.request.Argv, []string{"printf", "ok"}) {
 		t.Fatalf("start calls=%d exec request=%+v", server.startCalls, executor.request)
+	}
+}
+
+func TestEnvironmentRunCreatesAndAttachesWithConfiguredEnvironment(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-run\nagent: shell\nworkspace: .\nenv:\n  RUN_MODE: configured\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sandboxes := &runSandbox{}
+	sessions := &fakeSessions{}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.In = strings.NewReader("")
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return runClient{sandboxes: sandboxes, sessions: sessions}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "run", "--force", path, "--", "printf", "hello"}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if sandboxes.createCalls != 1 || sandboxes.created.Name != "env-run" || sandboxes.created.Env["RUN_MODE"] != "configured" {
+		t.Fatalf("create calls=%d request=%+v", sandboxes.createCalls, sandboxes.created)
+	}
+	if !sessions.opened || !reflect.DeepEqual(sessions.req.Argv, []string{"printf", "hello"}) || !reflect.DeepEqual(sessions.req.Env, []string{"RUN_MODE=configured"}) {
+		t.Fatalf("session=%+v", sessions.req)
+	}
+}
+
+func TestEnvironmentRunRequiresExplicitAdoptionForExistingSandbox(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-existing\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sandboxes := &runSandbox{items: []sdk.Sandbox{{
+		ID: "sb-existing", Name: "env-existing", Agent: "shell", State: sdk.StateRunning,
+		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
+	}}}
+	sessions := &fakeSessions{}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.In = strings.NewReader("")
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return runClient{sandboxes: sandboxes, sessions: sessions}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "run", "--force", path}); code == 0 {
+		t.Fatal("non-interactive adoption unexpectedly succeeded")
+	}
+	if sandboxes.createCalls != 0 || sessions.opened || !strings.Contains(stderr.String(), "adoption requires a terminal") {
+		t.Fatalf("create=%d opened=%t stderr=%q", sandboxes.createCalls, sessions.opened, stderr.String())
 	}
 }
 

@@ -259,6 +259,160 @@ func (r *Runner) environmentExec(ctx context.Context, args []string) int {
 	return r.exec(ctx, append([]string{sandbox.ID}, command...))
 }
 
+func (r *Runner) environmentRun(ctx context.Context, args []string) int {
+	options, agentArgs, detach, err := parseEnvironmentRunOptions(r, args)
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return r.flagParseFailure("env run", err)
+	}
+	plan, environment, workspacePath, memory, err := loadEnvironmentCreatePlan(options)
+	if err != nil {
+		_, _ = fmt.Fprintf(r.Err, "rsbx env run: %s\n", err)
+		return 1
+	}
+	defer clear(environment)
+	if err := r.approveEnvironmentCreate(plan, options.force); err != nil {
+		if errors.Is(err, errEnvironmentCanceled) {
+			_, _ = fmt.Fprintln(r.Out, "Environment run canceled")
+			return 0
+		}
+		r.error(err)
+		return 1
+	}
+	client, err := r.client()
+	if err != nil {
+		r.error(err)
+		return 1
+	}
+	defer func() { _ = client.Close() }()
+	entries := environmentEntries(environment)
+	clear(environment)
+	entries, err = prepareAgentCredentials(ctx, client, plan.Agent, plan.Name, entries)
+	if err != nil {
+		r.error(err)
+		return 1
+	}
+	defer clear(entries)
+	if err := validateOAuthProxyEnvironment(entries); err != nil {
+		r.error(err)
+		return 1
+	}
+	request := buildEnvironmentCreateRequest(plan, envMap(entries), workspacePath, memory)
+	sandbox, created, err := r.resolveEnvironmentRunSandbox(ctx, client, plan, request, entries)
+	if err != nil {
+		r.error(err)
+		return 1
+	}
+	if sandbox.ID == "" {
+		return 0
+	}
+	opts := runOptions{name: plan.Name, detach: detach}
+	if plan.CPUs != nil {
+		opts.cpus = uint(*plan.CPUs)
+	}
+	if plan.Memory != "" {
+		opts.memory = plan.Memory
+	}
+	resources := runResources{cpus: request.CPUs, memory: request.MemoryMiB, env: entries, ports: request.Ports}
+	return r.runAttached(ctx, client, opts, sandbox, created, plan.Agent, request.Workspaces, true, agentArgs, resources)
+}
+
+func (r *Runner) resolveEnvironmentRunSandbox(ctx context.Context, client sdk.Client, plan envfile.Plan, request sdk.CreateRequest, environment []string) (*sdk.Sandbox, bool, error) {
+	sandbox, found, err := lookupSandboxByName(ctx, client, plan.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	if found {
+		return r.adoptEnvironmentSandbox(sandbox, plan, request)
+	}
+	request.Env = envMap(environment)
+	op, err := client.Sandboxes().Create(ctx, request)
+	if err != nil {
+		return nil, false, err
+	}
+	if op != nil && op.SandboxID != "" {
+		createdSandbox, getErr := client.Sandboxes().Get(ctx, op.SandboxID)
+		if getErr != nil {
+			return nil, false, getErr
+		}
+		return createdSandbox, true, nil
+	}
+	var created bool
+	sandbox, created, err = lookupSandboxByName(ctx, client, plan.Name)
+	if err == nil && !created {
+		err = errors.New("sandbox creation returned no sandbox")
+	}
+	return sandbox, err == nil, err
+}
+
+func (r *Runner) adoptEnvironmentSandbox(sandbox *sdk.Sandbox, plan envfile.Plan, request sdk.CreateRequest) (*sdk.Sandbox, bool, error) {
+	if sandbox.Agent != plan.Agent {
+		return nil, false, errors.New("existing sandbox agent does not match the environment")
+	}
+	if err := checkReusedWorkspace(sandbox, request.Workspaces); err != nil {
+		return nil, false, err
+	}
+	confirmed, err := r.confirmEnvironmentAdoption(sandbox.Name)
+	if err != nil {
+		return nil, false, err
+	}
+	if !confirmed {
+		_, _ = fmt.Fprintln(r.Out, "Environment adoption canceled")
+		return nil, false, nil
+	}
+	return sandbox, false, nil
+}
+
+func parseEnvironmentRunOptions(r *Runner, args []string) (environmentCreateOptions, []string, bool, error) {
+	if slices.Contains(args, helpFlag) || slices.Contains(args, helpShort) {
+		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env run [PATH...] [--detach] [--force] [--name NAME] [-- AGENT-ARGS...]\n\nCreate an environment if absent, then start and attach to its configured agent. Reusing an existing sandbox requires interactive adoption approval.\n")
+		return environmentCreateOptions{}, nil, false, flag.ErrHelp
+	}
+	head, agentArgs := splitAgentArgs(args)
+	filtered := make([]string, 0, len(head))
+	detach := false
+	for _, arg := range head {
+		if arg == "--detach" || arg == "-d" {
+			detach = true
+			continue
+		}
+		filtered = append(filtered, arg)
+	}
+	options, err := parseEnvironmentCreateOptions(r, filtered)
+	return options, agentArgs, detach, err
+}
+
+func environmentEntries(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	entries := make([]string, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, key+"="+values[key])
+	}
+	return entries
+}
+
+func (r *Runner) confirmEnvironmentAdoption(name string) (bool, error) {
+	file, ok := r.In.(*os.File)
+	if !ok || !term.IsTerminal(int(file.Fd())) {
+		return false, errors.New("environment adoption requires a terminal; --force does not approve adoption")
+	}
+	if _, err := fmt.Fprintf(r.Err, "Sandbox %s already exists. Adopt and attach to it? [y/N] ", name); err != nil {
+		return false, errors.New("write environment adoption prompt failed")
+	}
+	answer, err := bufio.NewReader(r.In).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, errors.New("read environment adoption confirmation")
+	}
+	answer = strings.TrimSpace(strings.ToLower(answer))
+	return answer == answerShortYes || answer == answerYes, nil
+}
+
 var errEnvironmentCanceled = errors.New("environment creation was canceled")
 
 func (r *Runner) approveEnvironmentCreate(plan envfile.Plan, force bool) error {
