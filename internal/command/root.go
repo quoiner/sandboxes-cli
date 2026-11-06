@@ -31,6 +31,8 @@ const (
 	commandCreate     = "create"
 	commandExec       = "exec"
 	commandRun        = "run"
+	envArgFlag        = "--env-arg"
+	envArgsFileFlag   = "--env-args-file"
 	workspaceLabel    = "workspace"
 	commandGet        = "get"
 	commandInspect    = "inspect"

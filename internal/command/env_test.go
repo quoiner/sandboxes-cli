@@ -119,7 +119,7 @@ func TestEnvironmentPlanEscapesWorkspaceControlCharacters(t *testing.T) {
 }
 
 func TestEnvironmentMutatingCommandsFailClosed(t *testing.T) {
-	for _, args := range [][]string{{"env", "rm", "x"}, {"env", "ls"}} {
+	for _, args := range [][]string{{"env", "ls"}} {
 		t.Run(strings.Join(args, "_"), func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			runner := NewRunner(&stdout, &stderr)
@@ -261,11 +261,47 @@ func TestEnvironmentExecStartsMatchingSandboxAndRunsCommand(t *testing.T) {
 	runner.NewClient = func(string) (sdk.Client, error) {
 		return recordingExecClient{fakeClient: fakeClient{sandbox: server}, executor: executor}, nil
 	}
-	if code := runner.Run(context.Background(), []string{"env", "exec", path, "--", "printf", "ok"}); code != 0 {
+	if code := runner.Run(context.Background(), []string{"env", "exec", "-e", "CHECK=1", "-w", "/tmp", path, "--", "printf", "ok"}); code != 0 {
 		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if server.startCalls != 1 || executor.request.SandboxID != "sb-env-exec" || !reflect.DeepEqual(executor.request.Argv, []string{"printf", "ok"}) {
+	if server.startCalls != 1 || executor.request.SandboxID != "sb-env-exec" || !reflect.DeepEqual(executor.request.Argv, []string{"printf", "ok"}) || executor.request.Workdir != "/tmp" || !reflect.DeepEqual(executor.request.Env, []string{"CHECK=1"}) {
 		t.Fatalf("start calls=%d exec request=%+v", server.startCalls, executor.request)
+	}
+}
+
+func TestEnvironmentExecUsesCurrentDirectoryWithoutSeparator(t *testing.T) {
+	workspace := t.TempDir()
+	t.Chdir(workspace)
+	if err := os.WriteFile(filepath.Join(workspace, "sbxenv.yaml"), []byte("schemaVersion: \"1\"\nname: env-exec-current\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := &environmentExecSandbox{item: sdk.Sandbox{
+		ID: "sb-env-current", Name: "env-exec-current", Agent: "shell", State: sdk.StateRunning,
+		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
+	}}
+	executor := &recordingExecutor{}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return recordingExecClient{fakeClient: fakeClient{sandbox: server}, executor: executor}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "exec", "printf", "ok"}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if executor.request.SandboxID != "sb-env-current" || !reflect.DeepEqual(executor.request.Argv, []string{"printf", "ok"}) {
+		t.Fatalf("exec request=%+v", executor.request)
+	}
+}
+
+func TestEnvironmentExecHelpDoesNotConsumeCommandHelp(t *testing.T) {
+	if environmentExecHelpRequested([]string{"grep", "--help"}) {
+		t.Fatal("command help flag was mistaken for CLI help")
+	}
+	if environmentExecHelpRequested([]string{"-e", "MESSAGE=--help", "printf", "ok"}) {
+		t.Fatal("environment value was mistaken for CLI help")
+	}
+	if !environmentExecHelpRequested([]string{"--help"}) {
+		t.Fatal("CLI help flag was not recognized")
 	}
 }
 
@@ -294,14 +330,14 @@ func TestEnvironmentRunCreatesAndAttachesWithConfiguredEnvironment(t *testing.T)
 	}
 }
 
-func TestEnvironmentRunRequiresExplicitAdoptionForExistingSandbox(t *testing.T) {
+func TestEnvironmentRunReusesMatchingSandboxWithoutReprovisioning(t *testing.T) {
 	workspace := t.TempDir()
 	path := filepath.Join(workspace, "sbxenv.yaml")
 	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-existing\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	sandboxes := &runSandbox{items: []sdk.Sandbox{{
-		ID: "sb-existing", Name: "env-existing", Agent: "shell", State: sdk.StateRunning,
+		ID: "sb-existing", Name: "env-existing", Agent: "shell", State: sdk.StateStopped,
 		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
 	}}}
 	sessions := &fakeSessions{}
@@ -311,11 +347,59 @@ func TestEnvironmentRunRequiresExplicitAdoptionForExistingSandbox(t *testing.T) 
 	runner.NewClient = func(string) (sdk.Client, error) {
 		return runClient{sandboxes: sandboxes, sessions: sessions}, nil
 	}
-	if code := runner.Run(context.Background(), []string{"env", "run", "--force", path}); code == 0 {
-		t.Fatal("non-interactive adoption unexpectedly succeeded")
+	if code := runner.Run(context.Background(), []string{"env", "run", path, "--", "printf", "hello"}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	if sandboxes.createCalls != 0 || sessions.opened || !strings.Contains(stderr.String(), "adoption requires a terminal") {
-		t.Fatalf("create=%d opened=%t stderr=%q", sandboxes.createCalls, sessions.opened, stderr.String())
+	if sandboxes.createCalls != 0 || sandboxes.startCalls != 1 || !sessions.opened || !reflect.DeepEqual(sessions.req.Argv, []string{"printf", "hello"}) {
+		t.Fatalf("create=%d start=%d opened=%t request=%+v", sandboxes.createCalls, sandboxes.startCalls, sessions.opened, sessions.req)
+	}
+}
+
+func TestEnvironmentRemoveDeletesOnlyMatchingSandboxWithForce(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-remove\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sandboxes := &runSandbox{items: []sdk.Sandbox{{
+		ID: "sb-remove", Name: "env-remove", Agent: "shell", State: sdk.StateRunning,
+		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
+	}}}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.In = strings.NewReader("")
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return runClient{sandboxes: sandboxes, sessions: &fakeSessions{}}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "rm", "--force", path}); code != 0 {
+		t.Fatalf("exit=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if sandboxes.deleteCalls != 1 || sandboxes.deleteID != "sb-remove" || !sandboxes.deleteForce {
+		t.Fatalf("delete calls=%d id=%q force=%t", sandboxes.deleteCalls, sandboxes.deleteID, sandboxes.deleteForce)
+	}
+}
+
+func TestEnvironmentRemoveRequiresConfirmationWithoutForce(t *testing.T) {
+	workspace := t.TempDir()
+	path := filepath.Join(workspace, "sbxenv.yaml")
+	if err := os.WriteFile(path, []byte("schemaVersion: \"1\"\nname: env-remove\nagent: shell\nworkspace: .\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sandboxes := &runSandbox{items: []sdk.Sandbox{{
+		ID: "sb-remove", Name: "env-remove", Agent: "shell", State: sdk.StateRunning,
+		Workspace: workspace, Workspaces: []sdk.Workspace{{Path: workspace}},
+	}}}
+	var stdout, stderr bytes.Buffer
+	runner := NewRunner(&stdout, &stderr)
+	runner.In = strings.NewReader("")
+	runner.NewClient = func(string) (sdk.Client, error) {
+		return runClient{sandboxes: sandboxes, sessions: &fakeSessions{}}, nil
+	}
+	if code := runner.Run(context.Background(), []string{"env", "rm", path}); code == 0 {
+		t.Fatal("non-interactive environment removal unexpectedly succeeded")
+	}
+	if sandboxes.deleteCalls != 0 || !strings.Contains(stderr.String(), "use --force to skip confirmation") {
+		t.Fatalf("delete calls=%d stderr=%q", sandboxes.deleteCalls, stderr.String())
 	}
 }
 

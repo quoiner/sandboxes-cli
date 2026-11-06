@@ -26,7 +26,7 @@ func (f *repeatedStringFlag) Set(value string) error {
 
 func (r *Runner) environment(ctx context.Context, args []string) int {
 	if len(args) == 0 || args[0] == "--help" || args[0] == "-h" {
-		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env COMMAND [PATH...]\n\nCommands: plan, create, run, exec.\n\nUse 'plan' for a static preview, 'create' to apply without attaching, 'run' to create or attach to an agent, or 'exec' to run a command in an existing environment. rm is not implemented yet. Environment values are never displayed.\n")
+		_, _ = fmt.Fprint(r.Out, "Usage: rsbx env COMMAND [PATH...]\n\nCommands: plan, create, run, exec, rm.\n\nUse 'plan' for a static preview, 'create' to apply without attaching, 'run' to create or attach to an agent, 'exec' to run a command in an existing environment, or 'rm' to remove its matching sandbox. Environment values are never displayed.\n")
 		return 0
 	}
 	switch args[0] {
@@ -38,6 +38,8 @@ func (r *Runner) environment(ctx context.Context, args []string) int {
 		return r.environmentExec(ctx, args[1:])
 	case commandRun:
 		return r.environmentRun(ctx, args[1:])
+	case "rm":
+		return r.environmentRemove(ctx, args[1:])
 	default:
 		_, _ = fmt.Fprintf(r.Err, "rsbx env %s: unsupported\n", args[0])
 		return 1
@@ -54,7 +56,7 @@ func (r *Runner) environmentPlan(args []string) int {
 	fs.Usage = func() {
 		_, _ = fmt.Fprint(fs.Output(), "Usage: rsbx env plan [PATH...] [flags]\n\nWithout PATH, read sbxenv.yaml from the current directory and merge optional ~/.sbxenv.yaml defaults first. Explicit file or directory paths merge in order and skip user defaults.\nYAML values expand env.projectDir and env.fileDir references. Declared ports are validated and displayed without opening sockets. Argument values are validated, redacted, and interpolated once into YAML values; kit arguments are unsupported.\n  --name NAME                 override the sandbox name\n  --env-arg name=value        set a declared environment argument (repeatable; overrides files)\n  --env-args-file PATH        read name=value arguments (repeatable)\n\nValues passed through --env-arg may be visible in host process listings; use --env-args-file for sensitive values. This is a static preview only; it does not apply changes or inspect daemon state.\n")
 	}
-	valueFlags := map[string]bool{"--name": true, "--env-arg": true, "--env-args-file": true}
+	valueFlags := map[string]bool{nameFlag: true, envArgFlag: true, envArgsFileFlag: true}
 	if err := fs.Parse(reorderFlagArgs(args, valueFlags)); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
