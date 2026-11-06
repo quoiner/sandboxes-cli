@@ -176,55 +176,84 @@ func LoadWithArguments(paths []string, overrides ArgumentOverrides) (Plan, error
 	if err != nil {
 		return Plan{}, err
 	}
+	plan, values, err := load(paths, filepath.Dir(firstFile), overrides)
+	clear(values)
+	return plan, err
+}
+
+// LoadForExecution returns a validated preview and the environment values
+// required to create the sandbox. Callers must not log or display values and
+// should clear the returned map as soon as the create request is complete.
+func LoadForExecution(paths []string, overrides ArgumentOverrides) (Plan, map[string]string, error) {
+	if len(paths) == 0 {
+		return Plan{}, nil, errors.New("an explicit environment file or directory is required")
+	}
+	firstFile, err := resolveFile(paths[0])
+	if err != nil {
+		return Plan{}, nil, err
+	}
 	return load(paths, filepath.Dir(firstFile), overrides)
 }
 
-func load(paths []string, projectDir string, overrides ArgumentOverrides) (Plan, error) {
+func load(paths []string, projectDir string, overrides ArgumentOverrides) (Plan, map[string]string, error) {
 	documents, arguments, err := readSourceDocuments(paths)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, nil, err
 	}
 	names, argumentValues, err := resolveArgumentValues(arguments, overrides)
 	if err != nil {
-		return Plan{}, err
+		return Plan{}, nil, err
 	}
 	defer clear(argumentValues)
 	clear(arguments)
 	var plan Plan
+	environment := make(map[string]string)
 	for _, source := range documents {
 		root, _, digest, err := readDocumentNode(source.path)
 		if err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
 		if digest != source.digest {
-			return Plan{}, errors.New("environment file changed during preview; retry")
+			clear(environment)
+			return Plan{}, nil, errors.New("environment file changed during preview; retry")
 		}
 		referenceUsage := findArgumentReferenceUsage(root)
 		if err := stripArgumentDefinitions(root); err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
 		if err := interpolateEnvironmentReferences(root, argumentValues, filepath.Dir(source.path), projectDir); err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
 		doc, err := decodeDocumentNode(root)
 		if err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
 		if err := doc.validate(); err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
 		plan, err = mergeDocument(plan, doc, source.path, referenceUsage)
 		if err != nil {
-			return Plan{}, err
+			clear(environment)
+			return Plan{}, nil, err
 		}
+		for key, value := range doc.Env {
+			environment[key] = value
+		}
+		clear(doc.Env)
 	}
 	if plan.Agent == "" {
-		return Plan{}, errors.New("environment requires an agent")
+		clear(environment)
+		return Plan{}, nil, errors.New("environment requires an agent")
 	}
 	plan.ArgumentNames = names
 	sort.Strings(plan.EnvironmentKeys)
 	sort.Strings(plan.ArgumentNames)
-	return plan, nil
+	return plan, environment, nil
 }
 
 type sourceDocument struct {
@@ -281,9 +310,9 @@ func readSourceDocument(path string) (sourceDocument, map[string]argumentDeclara
 	return sourceDocument{path: filePath, digest: digest}, declarations, size, nil
 }
 
-// LoadDefault resolves the current-directory environment with optional
-// user-level defaults. Explicit paths should use Load so home defaults are
-// skipped, matching the sbx env command contract.
+// LoadDefault resolves the current-directory environment and optional
+// user-level defaults. Either file may be absent; at least one must exist.
+// Explicit paths should use Load so home defaults are skipped, matching sbx.
 func LoadDefault(homeDir, workingDir string) (Plan, error) {
 	return LoadDefaultWithArguments(homeDir, workingDir, ArgumentOverrides{})
 }
@@ -291,25 +320,56 @@ func LoadDefault(homeDir, workingDir string) (Plan, error) {
 // LoadDefaultWithArguments resolves user defaults and the current-directory
 // file, then validates transient argument values.
 func LoadDefaultWithArguments(homeDir, workingDir string, overrides ArgumentOverrides) (Plan, error) {
+	paths, projectDir, err := resolveDefaultEnvironmentPaths(homeDir, workingDir)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan, values, err := load(paths, filepath.Clean(projectDir), overrides)
+	clear(values)
+	return plan, err
+}
+
+// LoadDefaultForExecution resolves user defaults and the current-directory
+// environment, retaining validated environment values only for the caller.
+func LoadDefaultForExecution(homeDir, workingDir string, overrides ArgumentOverrides) (Plan, map[string]string, error) {
+	paths, projectDir, err := resolveDefaultEnvironmentPaths(homeDir, workingDir)
+	if err != nil {
+		return Plan{}, nil, err
+	}
+	return load(paths, filepath.Clean(projectDir), overrides)
+}
+
+func resolveDefaultEnvironmentPaths(homeDir, workingDir string) ([]string, string, error) {
 	if strings.TrimSpace(homeDir) == "" || strings.TrimSpace(workingDir) == "" {
-		return Plan{}, errors.New("resolve default environment paths")
+		return nil, "", errors.New("resolve default environment paths")
 	}
 	paths := make([]string, 0, 2)
 	homeFile := filepath.Join(homeDir, ".sbxenv.yaml")
 	if info, err := os.Stat(homeFile); err == nil {
 		if !info.Mode().IsRegular() {
-			return Plan{}, errors.New("user environment defaults are not a regular file")
+			return nil, "", errors.New("user environment defaults are not a regular file")
 		}
 		paths = append(paths, homeFile)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return Plan{}, errors.New("inspect user environment defaults")
+		return nil, "", errors.New("inspect user environment defaults")
 	}
-	paths = append(paths, workingDir)
+	projectFile := filepath.Join(workingDir, "sbxenv.yaml")
+	if info, err := os.Stat(projectFile); err == nil {
+		if !info.Mode().IsRegular() {
+			return nil, "", errors.New("project environment is not a regular file")
+		}
+		paths = append(paths, workingDir)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, "", errors.New("inspect project environment")
+	}
+	if len(paths) == 0 {
+		return nil, "", errors.New("no environment file or user defaults found")
+	}
 	projectDir, err := filepath.Abs(workingDir)
 	if err != nil {
-		return Plan{}, errors.New("resolve default environment paths")
+		return nil, "", errors.New("resolve default environment paths")
 	}
-	return load(paths, filepath.Clean(projectDir), overrides)
+	return paths, filepath.Clean(projectDir), nil
 }
 
 func mergeDocument(plan Plan, doc document, filePath string, references argumentReferenceUsage) (Plan, error) {

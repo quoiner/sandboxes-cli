@@ -642,13 +642,13 @@ func policyRules(sb *sdk.Sandbox) []policyRuleOutput {
 	for _, workspace := range sb.Workspaces {
 		readID := filesystemRuleID(workspace.Path, "read")
 		out = append(out, policyRuleOutput{RuleID: readID, Scope: sandboxPrefix, ResourceType: filesystemKeyword,
-			Action: actionAllow, Provenance: "workspace", Path: workspace.Path, Access: "read"})
+			Action: actionAllow, Provenance: workspaceLabel, Path: workspace.Path, Access: "read"})
 		action := actionAllow
 		if workspace.ReadOnly {
 			action = actionDeny
 		}
 		out = append(out, policyRuleOutput{RuleID: filesystemRuleID(workspace.Path, "write"), Scope: sandboxPrefix, ResourceType: filesystemKeyword,
-			Action: action, Provenance: "workspace", Path: workspace.Path, Access: "write"})
+			Action: action, Provenance: workspaceLabel, Path: workspace.Path, Access: "write"})
 	}
 	return out
 }

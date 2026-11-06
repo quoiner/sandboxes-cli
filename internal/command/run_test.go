@@ -51,12 +51,17 @@ type runSandbox struct {
 	startCalls  int
 	deleteCalls int
 	deleteID    string
+	deleteForce bool
 	deleteErr   error
 }
 
 func (s *runSandbox) Create(_ context.Context, req sdk.CreateRequest) (*sdk.Operation, error) {
 	s.createCalls++
 	s.created = req
+	s.created.Env = make(map[string]string, len(req.Env))
+	for key, value := range req.Env {
+		s.created.Env[key] = value
+	}
 	item := sdk.Sandbox{ID: "sb-run", Name: req.Name, State: sdk.StateRunning, Image: req.Image, Workspace: req.Workspace}
 	s.items = append(s.items, item)
 	return &sdk.Operation{ID: "op-create", SandboxID: item.ID, Kind: "create", State: sdk.StateDone}, nil
@@ -77,9 +82,10 @@ func (s *runSandbox) List(context.Context, sdk.ListOptions) (*sdk.Page[sdk.Sandb
 	return &sdk.Page[sdk.Sandbox]{Items: items}, nil
 }
 
-func (s *runSandbox) Delete(_ context.Context, id string, _ sdk.DeleteOptions) (*sdk.Operation, error) {
+func (s *runSandbox) Delete(_ context.Context, id string, options sdk.DeleteOptions) (*sdk.Operation, error) {
 	s.deleteCalls++
 	s.deleteID = id
+	s.deleteForce = options.Force
 	if s.deleteErr != nil {
 		return nil, s.deleteErr
 	}
@@ -106,6 +112,7 @@ type fakeSessions struct {
 
 func (s *fakeSessions) OpenSession(_ context.Context, req sdk.SessionRequest) (sdk.ExecSession, error) {
 	s.req = req
+	s.req.Env = append([]string(nil), req.Env...)
 	s.opened = true
 	return &fakeSession{sessions: s}, nil
 }
