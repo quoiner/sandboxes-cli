@@ -134,11 +134,11 @@ func (r *Runner) mcpAdd(ctx context.Context, args []string) int {
 	directory := fs.String("dir", "", "working directory")
 	remoteURL := fs.String("url", "", "remote streamable-HTTPS MCP endpoint (mutually exclusive with --command)")
 	fs.Var(&serverArgs, "args", "comma-separated MCP executable arguments (repeatable)")
-	fs.Var(&headerArgs, "header", "static non-secret remote header as Name:Value (repeatable)")
+	fs.Var(&headerArgs, "header", "remote header as Name:Value; use ${name} for host-vault secrets")
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(fs.Output(), "Usage: rsbx mcp add NAME %s EXECUTABLE [--args ARG] [--dir PATH]\n", commandFlag)
 		_, _ = fmt.Fprintln(fs.Output(), "       rsbx mcp add NAME --url https://HOST/mcp [--header Name:Value]")
-		_, _ = fmt.Fprintln(fs.Output(), "Runs the registered stdio server on the host after daemon approval. Command arguments are stored as local metadata; do not put secrets in them. Remote servers are limited to the daemon's allowed hosts; secret headers are not accepted here.")
+		_, _ = fmt.Fprintln(fs.Output(), "Runs the registered stdio server on the host after daemon approval. Remote servers are limited to the daemon's allowed hosts. Store header values with rsbx secret set mcp:NAME:PLACEHOLDER; reference them as ${PLACEHOLDER}.")
 	}
 	if err := fs.Parse(reorderFlagArgs(args, map[string]bool{commandFlag: true, "--dir": true, mcpArgsFlagName: true, "--url": true, "--header": true})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -193,15 +193,45 @@ func parseMCPHeaders(values []string) (map[string]string, error) {
 		if !ok || name == "" {
 			return nil, fmt.Errorf("invalid MCP header %q, want Name:Value", value)
 		}
-		if strings.EqualFold(name, "authorization") || strings.EqualFold(name, "proxy-authorization") {
-			return nil, errors.New("secret MCP headers must come from the host credential broker, not the CLI")
-		}
 		if strings.ContainsAny(name, "\r\n") || strings.ContainsAny(headerValue, "\r\n") {
 			return nil, errors.New("MCP headers must not contain control characters")
 		}
-		headers[name] = strings.TrimSpace(headerValue)
+		headerValue = strings.TrimSpace(headerValue)
+		refs, err := mcpHeaderPlaceholderNames(headerValue)
+		if err != nil {
+			return nil, err
+		}
+		if (strings.EqualFold(name, "authorization") || strings.EqualFold(name, "proxy-authorization")) && len(refs) == 0 {
+			return nil, errors.New("authorization MCP headers must use a host-vault ${placeholder}")
+		}
+		headers[name] = headerValue
 	}
 	return headers, nil
+}
+
+func mcpHeaderPlaceholderNames(value string) ([]string, error) {
+	var names []string
+	for offset := 0; ; {
+		start := strings.Index(value[offset:], "${")
+		if start < 0 {
+			if strings.Contains(value[offset:], "}") {
+				return nil, errors.New("invalid MCP header placeholder")
+			}
+			return names, nil
+		}
+		start += offset
+		end := strings.IndexByte(value[start+2:], '}')
+		if end < 0 {
+			return nil, errors.New("invalid MCP header placeholder")
+		}
+		end += start + 2
+		name := value[start+2 : end]
+		if !validMCPSecretPart(name, false) {
+			return nil, errors.New("invalid MCP header placeholder")
+		}
+		names = append(names, name)
+		offset = end + 1
+	}
 }
 
 func (r *Runner) registerMCPRemoteServer(ctx context.Context, client sdk.Client, name, rawURL string, headers map[string]string) error {

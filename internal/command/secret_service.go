@@ -67,7 +67,7 @@ func (r *Runner) serviceSecretSet(ctx context.Context, args []string) int {
 	service := ""
 	switch {
 	case fs.NArg() == 1:
-		service = strings.ToLower(fs.Arg(0))
+		service = normalizeServiceSecret(fs.Arg(0))
 	case *oauth:
 		service = openAIService
 	default:
@@ -91,6 +91,10 @@ func (r *Runner) serviceSecretSet(ctx context.Context, args []string) int {
 	}
 	if !validServiceSecret(service) {
 		r.error(fmt.Errorf("unknown service %q; use one of: %s", service, strings.Join(serviceSecretNames, ", ")))
+		return 2
+	}
+	if strings.HasPrefix(service, "mcp:") && *sandboxName != "" {
+		r.error(errors.New("MCP header secrets use global host-vault scope; --sandbox is not supported"))
 		return 2
 	}
 	return r.finishServiceSecretSet(ctx, service, *sandboxName, *token, *ref, *command, *refresh, *noVerify, *showError, *oauth, *force, flagWasProvided(fs, "ref"), flagWasProvided(fs, "command"))
@@ -301,12 +305,46 @@ func (r *Runner) readServiceSecret() ([]byte, error) {
 }
 
 func validServiceSecret(service string) bool {
+	if validMCPSecretService(service) {
+		return true
+	}
 	for _, candidate := range serviceSecretNames {
 		if service == candidate {
 			return true
 		}
 	}
 	return false
+}
+
+func normalizeServiceSecret(service string) string {
+	if strings.Contains(service, ":") {
+		return service
+	}
+	return strings.ToLower(service)
+}
+
+func validMCPSecretService(service string) bool {
+	parts := strings.Split(service, ":")
+	return len(parts) == 3 && parts[0] == "mcp" && validMCPSecretPart(parts[1], true) && validMCPSecretPart(parts[2], false)
+}
+
+func validMCPSecretPart(value string, allowDot bool) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for index, char := range value {
+		if !validMCPSecretCharacter(char, allowDot) || index == 0 && (char == '_' || char == '-' || char == '.') {
+			return false
+		}
+	}
+	return true
+}
+
+func validMCPSecretCharacter(char rune, allowDot bool) bool {
+	if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+		return true
+	}
+	return allowDot && char == '.'
 }
 
 func (r *Runner) serviceSecretRemove(ctx context.Context, args []string) int {
@@ -328,10 +366,10 @@ func (r *Runner) serviceSecretRemove(ctx context.Context, args []string) int {
 	service := openAIService
 	if fs.NArg() == 2 {
 		*sandboxName = fs.Arg(0)
-		service = strings.ToLower(fs.Arg(1))
+		service = normalizeServiceSecret(fs.Arg(1))
 		_, _ = fmt.Fprintf(r.Err, "warning: the positional sandbox scope is deprecated and will be removed in a future release; use rsbx secret rm %s --sandbox %s\n", sanitizeTerminalText(service), sanitizeTerminalText(*sandboxName))
 	} else if fs.NArg() == 1 {
-		service = strings.ToLower(fs.Arg(0))
+		service = normalizeServiceSecret(fs.Arg(0))
 	}
 	if *global {
 		_, _ = fmt.Fprintln(r.Err, "warning: --global is deprecated; global is now the default for service secrets; omit --global, use --sandbox to target one sandbox, or use --all-sandboxes with --registry")
